@@ -17,14 +17,14 @@ This repository contains C++ implementations demonstrating shared-memory paralle
 
 OpenMP requires the `-fopenmp` flag to enable parallel regions. We also recommend using `-O3` for compiler-level optimizations.
 
-### 1. Compile DAXPY
+### 1. Compilation
 ```bash
-g++ -std=c++23 -Wall -Wextra -Wpedantic -fopenmp -O3 -o daxpy_loop daxpy_loop.cpp
+### 1. Compile DaxbyLoop
+g++ -std=c++23 -Wall -Wextra -Wpedantic -fopenmp -O3 -o daxpy_loop daxpy_loop.cpp 
+
 
 ### 2. Compile MATRIX MULTIPLICATION
-```bash 
 g++ std=c++23 -Wall -Wextra -Wpendtic -fopenmp -O3 -o matrix_multiplication matrix_multiplication .cpp
 
 ### 2. Compile pi
-```bash 
 g++ std=c++23 -Wall -Wextra -Wpendtic -fopenmp -O3 -o pi pi.cpp
