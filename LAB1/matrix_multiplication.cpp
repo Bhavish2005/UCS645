@@ -1,6 +1,5 @@
 #include <chrono>
 #include <limits>
-#include <print>
 #include <random>
 #include <vector>
 #include<iostream>
@@ -50,7 +49,7 @@ int main(){
         auto end_time{chrono::steady_clock::now()};
         auto exec_time{end_time-start_time};
         chrono::duration<double, milli> ms{exec_time};
-        cout<<"Execution time:"<<ms<<endl;
+        cout<<"Execution time:"<<ms.count()<<endl;
 
 
         cout<<"Using 1D Threading"<<endl;
@@ -68,7 +67,7 @@ int main(){
         end_time = chrono::steady_clock::now();
         exec_time = end_time-start_time;
         ms = exec_time;
-        cout<<"Execution time: "<< ms<<"\n";
+        cout<<"Execution time: "<< ms.count()<<"\n";
 
 
         cout<<"Using 2D Threading"<<endl;
@@ -87,7 +86,7 @@ int main(){
         end_time = chrono::steady_clock::now();
         exec_time = end_time-start_time;
         ms = exec_time;
-        cout<<"Execution time:"<<ms<<endl;
+        cout<<"Execution time:"<<ms.count()<<endl;
 
 
         cout<<"Using 2D Threading (collapsed)"<<"\n";
@@ -105,6 +104,5 @@ int main(){
         end_time = chrono::steady_clock::now();
         exec_time = end_time-start_time;
         ms = exec_time;
-        cout<<"Execution time: "<< ms;
         return 0;
 }

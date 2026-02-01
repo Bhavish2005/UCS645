@@ -36,7 +36,7 @@ int main(int argc, char** argv){
                 auto end_time{chrono::steady_clock::now()};
                 auto exec_time{end_time - start_time};
                 chrono::duration<double, std::milli> ms{exec_time};
-                cout<<"Execution time: "<<ms<<"\n";
+                cout<<"Execution time: "<<ms.count()<<"\n";
         }
         return EXIT_SUCCESS;
 }

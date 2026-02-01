@@ -19,7 +19,7 @@ int main(){
         auto end_time{ chrono::steady_clock::now()};
         auto exec_time{end_time-start_time};
         chrono::duration<double,  milli> ms{exec_time};
-        cout<<"Execution Time: "<<ms<<endl;
+        cout<<"Execution Time: "<<ms.count()<<endl;
         cout<<"Pi (Serial): "<<pi<<endl;
 
         sum = 0.0;
@@ -34,7 +34,7 @@ int main(){
         end_time =  chrono::steady_clock::now();
         exec_time = end_time-start_time;
         ms = exec_time;
-        cout<<"Execution Time:"<<ms<<endl;
+        cout<<"Execution Time:"<<ms.count()<<endl;
         cout<<"Pi (Parallel):"<<pi<<endl;
         return 0;
 }
