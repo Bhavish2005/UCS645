@@ -1,30 +1,34 @@
-# UCS645 Parllel and Distributed Computing 
+# Parallel Correlation Matrix Calculation 🚀
 
-This repository contains C++ implementations demonstrating shared-memory parallelism using the OpenMP API. The project benchmarks the performance difference between serial and parallel execution for Linear Algebra kernels and Numerical Integration.
+High-performance implementation of Pearson Correlation Coefficient calculation in C/C++. This project benchmarks **Sequential vs. Parallel** execution strategies and compares memory access patterns (**Flat Array vs. 2D Heap Array**) to analyze cache efficiency and thread scaling.
 
-## Project Structure
+## ⚡ Key Features
+* **Multi-Threading:** Utilizes **OpenMP** to parallelize the computationally intensive $O(N^3)$ correlation logic.
+* **Memory Optimization:** Compares **Contiguous (Flat)** vs. **Fragmented (2D Heap)** memory layouts to demonstrate cache locality effects.
+* **Hardware Acceleration:** Optimized for modern CPUs using vectorization (AVX/AVX2).
 
-* `daxpy_loop.cpp`: Implements the DAXPY linear algebra operation ($Y = aX + Y$) testing thread scalability from 2 to $N$ threads.
-* `matrix_multiplication.cpp`: Compares different OpenMP loop scheduling strategies (1D, 2D, Collapsed) against a serial baseline for Matrix Multiplication.
-* `pi.cpp`: Calculates the value of $\pi$ using numerical integration, demonstrating the use of the OpenMP `reduction` clause to handle race conditions.
+---
 
-## Prerequisites
+## 🛠️ Importance of the Makefile
+The included `Makefile` is not just for compilation; it is a critical component for achieving high performance. It applies specific compiler flags that unlock your hardware's full potential:
 
-* **Compiler:** GCC (`g++`) or any Clang-based compiler with OpenMP support.
-* **OS:** Linux/Unix (recommended for easy terminal usage).
+| Flag | Description |
+| :--- | :--- |
+| **`-O3`** | Enables aggressive compiler optimizations (e.g., loop unrolling, inlining) to maximize single-thread speed. |
+| **`-march=native`** | Instructs the compiler to use instructions specific to your CPU architecture (like **AVX/AVX2**), allowing it to process multiple data points per cycle. |
+| **`-fopenmp`** | Enables the **OpenMP** runtime, allowing the code to spawn threads and execute loops in parallel across all available CPU cores. |
 
-## Compilation Instructions
+---
 
-OpenMP requires the `-fopenmp` flag to enable parallel regions. We also recommend using `-O3` for compiler-level optimizations.
+## 🚀 Quick Start
 
-### 1. Compilation
+### Prerequisites
+* **GCC Compiler** (with OpenMP support)
+* **Make** build system
+
+### 💻 Commands
+
+**1. Build the Project:**
+Compiles the source code with all performance optimizations enabled.
 ```bash
-### 1. Compile DaxbyLoop
-g++ -std=c++23 -Wall -Wextra -Wpedantic -fopenmp -O3 -o daxpy_loop daxpy_loop.cpp 
-
-
-### 2. Compile MATRIX MULTIPLICATION
-g++ std=c++23 -Wall -Wextra -Wpendtic -fopenmp -O3 -o matrix_multiplication matrix_multiplication .cpp
-
-### 2. Compile pi
-g++ std=c++23 -Wall -Wextra -Wpendtic -fopenmp -O3 -o pi pi.cpp
+make
