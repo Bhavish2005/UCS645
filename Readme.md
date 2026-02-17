@@ -1,15 +1,15 @@
-# Parallel Correlation Matrix Calculation 🚀
+# Parallel Correlation Matrix Calculation 
 
 High-performance implementation of Pearson Correlation Coefficient calculation in C/C++. This project benchmarks **Sequential vs. Parallel** execution strategies and compares memory access patterns (**Flat Array vs. 2D Heap Array**) to analyze cache efficiency and thread scaling.
 
-## ⚡ Key Features
+##  Key Features
 * **Multi-Threading:** Utilizes **OpenMP** to parallelize the computationally intensive $O(N^3)$ correlation logic.
 * **Memory Optimization:** Compares **Contiguous (Flat)** vs. **Fragmented (2D Heap)** memory layouts to demonstrate cache locality effects.
 * **Hardware Acceleration:** Optimized for modern CPUs using vectorization (AVX/AVX2).
 
 ---
 
-## 🛠️ Importance of the Makefile
+## Importance of the Makefile
 The included `Makefile` is not just for compilation; it is a critical component for achieving high performance. It applies specific compiler flags that unlock your hardware's full potential:
 
 | Flag | Description |
@@ -20,13 +20,13 @@ The included `Makefile` is not just for compilation; it is a critical component 
 
 ---
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### Prerequisites
 * **GCC Compiler** (with OpenMP support)
 * **Make** build system
 
-### 💻 Commands
+### Commands To Run
 
 -   To Compile
     ``` bash
