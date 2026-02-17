@@ -28,7 +28,23 @@ The included `Makefile` is not just for compilation; it is a critical component 
 
 ### 💻 Commands
 
-**1. Build the Project:**
-Compiles the source code with all performance optimizations enabled.
-```bash
-make
+-   To Compile
+    ``` bash
+    make
+    ```
+-   To Run Parallel
+    ``` bash
+    make run
+    ```
+-   To Run Parallel with custom matrix size
+    ``` bash
+    make run ARGS="<number of rows> <number of columns>"
+    ```
+-   To Run Sequential
+    ``` bash
+    make run-seq
+    ```
+-   To Run Sequential with custom matrix size
+    ``` bash
+    make run-seq ARGS="<number of rows> <number of columns>"
+    ```
