@@ -3,5 +3,5 @@
 !*/*.cpp
 !.gitignore
 !Readme.md
-!.pdf
-
+!*/*.pdf
+!*/*.cu
