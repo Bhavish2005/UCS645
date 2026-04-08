@@ -5,3 +5,6 @@
 !Readme.md
 !*/*.pdf
 !*/*.cu
+!Makefile
+!*/*.c
+
