@@ -1,27 +1,3 @@
-/*
- * ============================================================
- * CUDA DIY Exercise 5: Full CNN Training Pipeline on MNIST
- * ============================================================
- * TOPIC        : cuDNN, cuBLAS, CUDA Streams, Full Training Loop
- * CUDA VERSION : 12.x  |  cuDNN 9.x  |  cuBLAS
- *
- * Learning Objectives:
- * 1. Use cuDNN to run Conv2D, BatchNorm, and Pooling forward passes
- * 2. Use cuBLAS for the fully-connected layer (SGEMM)
- * 3. Implement cross-entropy loss and softmax (custom kernel)
- * 4. Assemble a complete forward pass for LeNet on MNIST
- * 5. Use CUDA Streams to overlap data transfer with compute
- * 6. Implement the SGD optimizer kernel
- *
- * Compile:
- * nvcc -O2 -arch=sm_50 ex05_mnist_cnn.cu -o build/ex05_mnist_cnn \
- * -lcudnn -lcublas -lm
- *
- * Run:
- * ./build/ex05_mnist_cnn
- * ============================================================
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,532 +7,389 @@
 #include <cudnn.h>
 #include <cublas_v2.h>
 
-/* ── Error macros ─────────────────────────────────────────────────── */
-#define CUDA_CHECK(call)                                                    \
-    do { cudaError_t e=(call);                                              \
-         if(e!=cudaSuccess){fprintf(stderr,"CUDA %s:%d %s\n",              \
-         __FILE__,__LINE__,cudaGetErrorString(e));exit(1);} } while(0)
+#define GPU_CHK(call)                                                       \
+    do { cudaError_t err=(call);                                            \
+         if(err!=cudaSuccess){fprintf(stderr,"CUDA %s:%d %s\n",             \
+         __FILE__,__LINE__,cudaGetErrorString(err));exit(1);} } while(0)
 
-#define CUDNN_CHECK(call)                                                   \
-    do { cudnnStatus_t e=(call);                                            \
-         if(e!=CUDNN_STATUS_SUCCESS){fprintf(stderr,"cuDNN %s:%d %d\n",    \
-         __FILE__,__LINE__,(int)e);exit(1);} } while(0)
+#define DNN_CHK(call)                                                       \
+    do { cudnnStatus_t stat=(call);                                         \
+         if(stat!=CUDNN_STATUS_SUCCESS){fprintf(stderr,"cuDNN %s:%d %d\n",  \
+         __FILE__,__LINE__,(int)stat);exit(1);} } while(0)
 
-#define CUBLAS_CHECK(call)                                                  \
-    do { cublasStatus_t e=(call);                                           \
-         if(e!=CUBLAS_STATUS_SUCCESS){fprintf(stderr,"cuBLAS %s:%d %d\n",  \
-         __FILE__,__LINE__,(int)e);exit(1);} } while(0)
+#define BLAS_CHK(call)                                                      \
+    do { cublasStatus_t stat=(call);                                        \
+         if(stat!=CUBLAS_STATUS_SUCCESS){fprintf(stderr,"cuBLAS %s:%d %d\n",\
+         __FILE__,__LINE__,(int)stat);exit(1);} } while(0)
 
-/* ── Hyperparameters ─────────────────────────────────────────────── */
-#define BATCH_SIZE    256
-#define LEARNING_RATE 0.01f
-#define NUM_EPOCHS    10
-#define MNIST_IMG     784     /* 28 * 28 */
-#define NUM_CLASSES   10
+#define B_SIZE    256
+#define LR_VAL    0.01f
+#define EPOCHS    10
+#define IMG_SZ    784
+#define CLS_CNT   10
 
-/* ── Global handles ──────────────────────────────────────────────── */
-cudnnHandle_t   cudnn;
-cublasHandle_t  cublas;
+cudnnHandle_t   dnn_hndl;
+cublasHandle_t  blas_hndl;
 
-/* Wall-clock ms helper */
-static double wall_ms(void)
-{
-    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
-    return t.tv_sec*1e3 + t.tv_nsec*1e-6;
+static double get_time_ms(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec*1e3 + ts.tv_nsec*1e-6;
 }
 
-
-/* ================================================================
- * SECTION A — PROVIDED: MNIST Data Loader
- * ================================================================ */
-
-static int read_int(FILE* f)
-{
+static int read_32bit(FILE* fp) {
     unsigned char b[4];
-    fread(b, 1, 4, f);
+    fread(b, 1, 4, fp);
     return (b[0]<<24)|(b[1]<<16)|(b[2]<<8)|b[3];
 }
 
 typedef struct {
-    float* images;
-    int* labels;
-    int    n;
-} MnistData;
+    float* imgs;
+    int* lbls;
+    int count;
+} Dataset;
 
-MnistData load_mnist(const char* img_path, const char* lbl_path)
-{
-    FILE *fi = fopen(img_path, "rb");
-    FILE *fl = fopen(lbl_path, "rb");
-    if (!fi || !fl) {
-        fprintf(stderr, "Cannot open MNIST files. Make sure these exist:\n"
-                        "  %s\n  %s\n"
-                        "Download from http://yann.lecun.com/exdb/mnist/\n",
-                        img_path, lbl_path);
+Dataset load_dataset(const char* i_path, const char* l_path) {
+    FILE *f_img = fopen(i_path, "rb");
+    FILE *f_lbl = fopen(l_path, "rb");
+    if (!f_img || !f_lbl) {
+        fprintf(stderr, "Cannot open files.\n");
         exit(1);
     }
-    read_int(fi); read_int(fl);
-    int n    = read_int(fi); read_int(fl);
-    int rows = read_int(fi);
-    int cols = read_int(fi);
-    (void)rows; (void)cols;
+    read_32bit(f_img); read_32bit(f_lbl);
+    int cnt = read_32bit(f_img); read_32bit(f_lbl);
+    int r = read_32bit(f_img);
+    int c = read_32bit(f_img);
+    (void)r; (void)c;
 
-    MnistData d;
-    d.n      = n;
-    d.images = (float*)malloc((size_t)n * MNIST_IMG * sizeof(float));
-    d.labels = (int*)malloc(n * sizeof(int));
+    Dataset ds;
+    ds.count  = cnt;
+    ds.imgs = (float*)malloc((size_t)cnt * IMG_SZ * sizeof(float));
+    ds.lbls = (int*)malloc(cnt * sizeof(int));
 
-    unsigned char* buf = (unsigned char*)malloc(MNIST_IMG);
-    for (int i = 0; i < n; i++) {
-        fread(buf, 1, MNIST_IMG, fi);
-        for (int j = 0; j < MNIST_IMG; j++)
-            d.images[i * MNIST_IMG + j] = (buf[j] - 127.5f) / 127.5f;
-        unsigned char lbl; fread(&lbl, 1, 1, fl);
-        d.labels[i] = (int)lbl;
+    unsigned char* temp_buf = (unsigned char*)malloc(IMG_SZ);
+    for (int k = 0; k < cnt; k++) {
+        fread(temp_buf, 1, IMG_SZ, f_img);
+        for (int j = 0; j < IMG_SZ; j++)
+            ds.imgs[k * IMG_SZ + j] = (temp_buf[j] - 127.5f) / 127.5f;
+        unsigned char l_val; fread(&l_val, 1, 1, f_lbl);
+        ds.lbls[k] = (int)l_val;
     }
-    free(buf); fclose(fi); fclose(fl);
-    printf("[✓] Loaded %d MNIST samples from %s\n", n, img_path);
-    return d;
+    free(temp_buf); fclose(f_img); fclose(f_lbl);
+    printf("[✓] Loaded %d samples from %s\n", cnt, i_path);
+    return ds;
 }
 
-
-/* ================================================================
- * SECTION B — PROVIDED: cuDNN Descriptor Helpers
- * ================================================================ */
-
-cudnnTensorDescriptor_t make_tensor_desc(int N, int C, int H, int W)
-{
-    cudnnTensorDescriptor_t d;
-    CUDNN_CHECK(cudnnCreateTensorDescriptor(&d));
-    CUDNN_CHECK(cudnnSetTensor4dDescriptor(d, CUDNN_TENSOR_NCHW,
-                CUDNN_DATA_FLOAT, N, C, H, W));
-    return d;
+cudnnTensorDescriptor_t create_tsr_desc(int num, int ch, int ht, int wd) {
+    cudnnTensorDescriptor_t dsc;
+    DNN_CHK(cudnnCreateTensorDescriptor(&dsc));
+    DNN_CHK(cudnnSetTensor4dDescriptor(dsc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, num, ch, ht, wd));
+    return dsc;
 }
 
-cudnnFilterDescriptor_t make_filter_desc(int k, int c, int h, int w)
-{
-    cudnnFilterDescriptor_t d;
-    CUDNN_CHECK(cudnnCreateFilterDescriptor(&d));
-    CUDNN_CHECK(cudnnSetFilter4dDescriptor(d, CUDNN_DATA_FLOAT,
-                CUDNN_TENSOR_NCHW, k, c, h, w));
-    return d;
+cudnnFilterDescriptor_t create_flt_desc(int k, int c, int h, int w) {
+    cudnnFilterDescriptor_t dsc;
+    DNN_CHK(cudnnCreateFilterDescriptor(&dsc));
+    DNN_CHK(cudnnSetFilter4dDescriptor(dsc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, k, c, h, w));
+    return dsc;
 }
 
-cudnnConvolutionDescriptor_t make_conv_desc(int pad, int stride)
-{
-    cudnnConvolutionDescriptor_t d;
-    CUDNN_CHECK(cudnnCreateConvolutionDescriptor(&d));
-    CUDNN_CHECK(cudnnSetConvolution2dDescriptor(d, pad, pad, stride, stride,
-                1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));
-    return d;
+cudnnConvolutionDescriptor_t create_cnv_desc(int pad_v, int str_v) {
+    cudnnConvolutionDescriptor_t dsc;
+    DNN_CHK(cudnnCreateConvolutionDescriptor(&dsc));
+    DNN_CHK(cudnnSetConvolution2dDescriptor(dsc, pad_v, pad_v, str_v, str_v, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));
+    return dsc;
 }
 
-
-/* ================================================================
- * SECTION C — PROVIDED: Custom Kernels
- * ================================================================ */
-
-__global__ void reluInPlace(float* x, int N)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < N) x[i] = fmaxf(0.0f, x[i]);
+__global__ void kernel_relu(float* vec, int len) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < len) vec[idx] = fmaxf(0.0f, vec[idx]);
 }
 
-__global__ void softmaxCrossEntropy(const float* logits, const int* labels,
-                                    float* probs, float* loss, int N, int C)
-{
-    int n = blockIdx.x * blockDim.x + threadIdx.x;
-    if (n >= N) return;
+__global__ void kernel_sce(const float* lgt, const int* tgt, float* prb, float* lss, int n_items, int c_items) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n_items) return;
 
-    const float* row  = logits + n * C;
-    float* prow = probs  + n * C;
+    const float* c_row  = lgt + idx * c_items;
+    float* p_row = prb  + idx * c_items;
 
-    float maxV = -1e30f;
-    for (int c = 0; c < C; c++) maxV = fmaxf(maxV, row[c]);
-    float sumE = 0.0f;
-    for (int c = 0; c < C; c++) { prow[c] = expf(row[c] - maxV); sumE += prow[c]; }
-    for (int c = 0; c < C; c++) prow[c] /= sumE;
+    float m_val = -1e30f;
+    for (int j = 0; j < c_items; j++) m_val = fmaxf(m_val, c_row[j]);
+    float s_exp = 0.0f;
+    for (int j = 0; j < c_items; j++) { p_row[j] = expf(c_row[j] - m_val); s_exp += p_row[j]; }
+    for (int j = 0; j < c_items; j++) p_row[j] /= s_exp;
 
-    loss[n] = -logf(prow[labels[n]] + 1e-9f);
+    lss[idx] = -logf(p_row[tgt[idx]] + 1e-9f);
 }
 
-__global__ void sgdUpdate(float* w, const float* grad, float lr, int N)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < N) w[i] -= lr * grad[i];
+__global__ void kernel_sgd(float* wts, const float* gds, float lr_rt, int len) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < len) wts[idx] -= lr_rt * gds[idx];
 }
 
+void exec_conv(
+    cudnnTensorDescriptor_t in_d, float* d_in,
+    cudnnFilterDescriptor_t flt_d, float* d_flt,
+    cudnnConvolutionDescriptor_t cnv_d,
+    cudnnTensorDescriptor_t out_d, float* d_out) {
 
-/* ================================================================
- * SECTION E — DIY: cuDNN Convolution Forward Pass
- * ================================================================ */
+    float a_val = 1.0f, b_val = 0.0f;
+    int a_cnt;
+    cudnnConvolutionFwdAlgoPerf_t perf_res;
+    DNN_CHK(cudnnFindConvolutionForwardAlgorithm(
+        dnn_hndl, in_d, flt_d, cnv_d, out_d, 1, &a_cnt, &perf_res));
+    cudnnConvolutionFwdAlgo_t fwd_algo = perf_res.algo;
 
-void diy_cudnn_conv_forward(
-    cudnnTensorDescriptor_t     input_desc,   float* d_input,
-    cudnnFilterDescriptor_t     filter_desc,  float* d_filter,
-    cudnnConvolutionDescriptor_t conv_desc,
-    cudnnTensorDescriptor_t     output_desc,  float* d_output)
-{
-    float alpha = 1.0f, beta = 0.0f;
+    size_t wk_sz = 0;
+    DNN_CHK(cudnnGetConvolutionForwardWorkspaceSize(
+        dnn_hndl, in_d, flt_d, cnv_d, out_d, fwd_algo, &wk_sz));
 
-    // E1: Find the best cuDNN conv algorithm
-    int nAlgo;
-    cudnnConvolutionFwdAlgoPerf_t perfResult;
-    CUDNN_CHECK(cudnnFindConvolutionForwardAlgorithm(
-        cudnn,
-        input_desc, filter_desc, conv_desc, output_desc,
-        1, &nAlgo, &perfResult));
-    cudnnConvolutionFwdAlgo_t algo = perfResult.algo;
+    void* d_wk = NULL;
+    if (wk_sz > 0) GPU_CHK(cudaMalloc(&d_wk, wk_sz));
 
-    // E2: Allocate workspace memory required by cuDNN
-    size_t ws_bytes = 0;
-    CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
-        cudnn, input_desc, filter_desc, conv_desc, output_desc,
-        algo, &ws_bytes));
+    DNN_CHK(cudnnConvolutionForward(
+        dnn_hndl, &a_val, in_d, d_in, flt_d, d_flt,
+        cnv_d, fwd_algo, d_wk, wk_sz, &b_val, out_d, d_out));
 
-    void* d_ws = NULL;
-    if (ws_bytes > 0) CUDA_CHECK(cudaMalloc(&d_ws, ws_bytes));
-
-    // E3: Run the convolution forward pass
-    CUDNN_CHECK(cudnnConvolutionForward(
-        cudnn,
-        &alpha, input_desc, d_input,
-        filter_desc, d_filter,
-        conv_desc, algo, d_ws, ws_bytes,
-        &beta, output_desc, d_output));
-
-    if (d_ws) cudaFree(d_ws);
+    if (d_wk) cudaFree(d_wk);
 }
 
+void exec_pool(
+    cudnnTensorDescriptor_t in_d, float* d_in,
+    cudnnTensorDescriptor_t out_d, float* d_out,
+    int ph, int pw, int sh, int sw) {
 
-/* ================================================================
- * SECTION F — DIY: cuDNN Pooling Forward Pass
- * ================================================================ */
+    cudnnPoolingDescriptor_t p_desc;
+    DNN_CHK(cudnnCreatePoolingDescriptor(&p_desc));
+    DNN_CHK(cudnnSetPooling2dDescriptor(
+        p_desc, CUDNN_POOLING_MAX, CUDNN_NOT_PROPAGATE_NAN,
+        ph, pw, 0, 0, sh, sw));
 
-void diy_cudnn_maxpool_forward(
-    cudnnTensorDescriptor_t input_desc,  float* d_input,
-    cudnnTensorDescriptor_t output_desc, float* d_output,
-    int pool_h, int pool_w, int stride_h, int stride_w)
-{
-    // F1: Create pooling descriptor
-    cudnnPoolingDescriptor_t pool_desc;
-    CUDNN_CHECK(cudnnCreatePoolingDescriptor(&pool_desc));
-    CUDNN_CHECK(cudnnSetPooling2dDescriptor(
-        pool_desc, CUDNN_POOLING_MAX, CUDNN_NOT_PROPAGATE_NAN,
-        pool_h, pool_w,
-        0, 0,         // padding
-        stride_h, stride_w));
+    float a_val = 1.0f, b_val = 0.0f;
+    DNN_CHK(cudnnPoolingForward(
+        dnn_hndl, p_desc, &a_val, in_d, d_in, &b_val, out_d, d_out));
 
-    float alpha = 1.0f, beta = 0.0f;
-
-    // F2: Call cudnnPoolingForward
-    CUDNN_CHECK(cudnnPoolingForward(
-        cudnn, pool_desc, &alpha,
-        input_desc, d_input,
-        &beta, output_desc, d_output));
-
-    CUDNN_CHECK(cudnnDestroyPoolingDescriptor(pool_desc));
+    DNN_CHK(cudnnDestroyPoolingDescriptor(p_desc));
 }
 
-
-/* ================================================================
- * SECTION G — DIY: Fully-Connected Layer via cuBLAS
- * ================================================================ */
-
-__global__ void add_bias(float* output, const float* bias, int N, int C)
-{
-    int n = blockIdx.y, c = blockIdx.x * blockDim.x + threadIdx.x;
-    if (n < N && c < C) output[n * C + c] += bias[c];
+__global__ void kernel_bias(float* out_v, const float* bs_v, int b_sz, int f_sz) {
+    int n_i = blockIdx.y, c_i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (n_i < b_sz && c_i < f_sz) out_v[n_i * f_sz + c_i] += bs_v[c_i];
 }
 
-void diy_fc_forward(float* d_input, float* d_weight, float* d_bias,
-                    float* d_output, int N, int in_feat, int out_feat)
-{
-    float alpha = 1.0f, beta = 0.0f;
+void exec_fc(float* d_in, float* d_wts, float* d_bs, float* d_out, int b_sz, int in_f, int out_f) {
+    float a_val = 1.0f, b_val = 0.0f;
 
-    // G1: Use cublasSgemm to compute the FC layer
-    CUBLAS_CHECK(cublasSgemm(
-        cublas,
-        CUBLAS_OP_T,    // transpose W to get W^T
-        CUBLAS_OP_N,    // input as-is
-        out_feat,       // M: rows of output
-        N,              // N: columns of output
-        in_feat,        // K: inner dimension
-        &alpha,
-        d_weight, in_feat,   // W: [out_feat, in_feat]
-        d_input,  in_feat,   // X: [N, in_feat]
-        &beta,
-        d_output, out_feat   // Y: [N, out_feat]
+    BLAS_CHK(cublasSgemm(
+        blas_hndl, CUBLAS_OP_T, CUBLAS_OP_N, out_f, b_sz, in_f,
+        &a_val, d_wts, in_f, d_in, in_f, &b_val, d_out, out_f
     ));
 
-    // G2: Add bias
-    dim3 block(256);
-    dim3 grid((out_feat + 255) / 256, N);
-    add_bias<<<grid, block>>>(d_output, d_bias, N, out_feat);
+    dim3 blk(256);
+    dim3 grd((out_f + 255) / 256, b_sz);
+    kernel_bias<<<grd, blk>>>(d_out, d_bs, b_sz, out_f);
 }
 
+void demo_async(const float* host_imgs, int tot_samps, float* d_bA, float* d_bB) {
+    int bsz = B_SIZE;
+    size_t bytes_len = (size_t)bsz * IMG_SZ * sizeof(float);
+    int tot_b = tot_samps / bsz;
 
-/* ================================================================
- * SECTION H — DIY: CUDA Streams for Async Data Transfer
- * ================================================================ */
+    float *h_pin;
+    GPU_CHK(cudaMallocHost(&h_pin, tot_samps * IMG_SZ * sizeof(float)));
+    memcpy(h_pin, host_imgs, tot_samps * IMG_SZ * sizeof(float));
 
-void diy_async_pipeline_demo(const float* h_images, int n_samples,
-                             float* d_buf_A, float* d_buf_B)
-{
-    int batch = BATCH_SIZE;
-    size_t bytes = (size_t)batch * MNIST_IMG * sizeof(float);
-    int n_batches = n_samples / batch;
-
-    float *h_pinned;
-    CUDA_CHECK(cudaMallocHost(&h_pinned, n_samples * MNIST_IMG * sizeof(float)));
-    memcpy(h_pinned, h_images, n_samples * MNIST_IMG * sizeof(float));
-
-    // --- 1. Time Synchronous Approach ---
-    double t_sync_start = wall_ms();
-    for (int i = 0; i < n_batches; i++) {
-        CUDA_CHECK(cudaMemcpy(d_buf_A, h_pinned + i*batch*MNIST_IMG, bytes, cudaMemcpyHostToDevice));
-        reluInPlace<<<(batch * MNIST_IMG + 255)/256, 256>>>(d_buf_A, batch * MNIST_IMG);
-        CUDA_CHECK(cudaDeviceSynchronize());
+    double st_sync = get_time_ms();
+    for (int k = 0; k < tot_b; k++) {
+        GPU_CHK(cudaMemcpy(d_bA, h_pin + k*bsz*IMG_SZ, bytes_len, cudaMemcpyHostToDevice));
+        kernel_relu<<<(bsz * IMG_SZ + 255)/256, 256>>>(d_bA, bsz * IMG_SZ);
+        GPU_CHK(cudaDeviceSynchronize());
     }
-    double t_sync = wall_ms() - t_sync_start;
+    double t_sync = get_time_ms() - st_sync;
 
-    // --- 2. Time Asynchronous Approach ---
-    cudaStream_t compute_stream, transfer_stream;
-    CUDA_CHECK(cudaStreamCreate(&compute_stream));
-    CUDA_CHECK(cudaStreamCreate(&transfer_stream));
+    cudaStream_t s_cmp, s_xfr;
+    GPU_CHK(cudaStreamCreate(&s_cmp));
+    GPU_CHK(cudaStreamCreate(&s_xfr));
 
-    double t_async_start = wall_ms();
-    CUDA_CHECK(cudaMemcpyAsync(d_buf_A, h_pinned, bytes, cudaMemcpyHostToDevice, transfer_stream));
-    CUDA_CHECK(cudaStreamSynchronize(transfer_stream));
+    double st_async = get_time_ms();
+    GPU_CHK(cudaMemcpyAsync(d_bA, h_pin, bytes_len, cudaMemcpyHostToDevice, s_xfr));
+    GPU_CHK(cudaStreamSynchronize(s_xfr));
 
-    for (int i = 0; i < n_batches - 1; i++) {
-        CUDA_CHECK(cudaMemcpyAsync(d_buf_B, h_pinned + (i+1)*batch*MNIST_IMG, bytes, cudaMemcpyHostToDevice, transfer_stream));
-        reluInPlace<<<(batch * MNIST_IMG + 255)/256, 256, 0, compute_stream>>>(d_buf_A, batch * MNIST_IMG);
-        CUDA_CHECK(cudaStreamSynchronize(transfer_stream));
-        float *temp = d_buf_A; d_buf_A = d_buf_B; d_buf_B = temp;
+    for (int k = 0; k < tot_b - 1; k++) {
+        GPU_CHK(cudaMemcpyAsync(d_bB, h_pin + (k+1)*bsz*IMG_SZ, bytes_len, cudaMemcpyHostToDevice, s_xfr));
+        kernel_relu<<<(bsz * IMG_SZ + 255)/256, 256, 0, s_cmp>>>(d_bA, bsz * IMG_SZ);
+        GPU_CHK(cudaStreamSynchronize(s_xfr));
+        float *tmp = d_bA; d_bA = d_bB; d_bB = tmp;
     }
-    double t_async = wall_ms() - t_async_start;
+    double t_async = get_time_ms() - st_async;
 
-    printf("  [H-AsyncPipeline] Sync time: %.2f ms | Async time: %.2f ms\n", t_sync, t_async);
-    printf("  [H-AsyncPipeline] Stream Speedup: Async transfers reduced total time by %.2f ms (%.4f seconds).\n",
-           t_sync - t_async, (t_sync - t_async)/1000.0);
+    printf("  [AsyncPipeline] Sync: %.2f ms | Async: %.2f ms\n", t_sync, t_async);
+    printf("  [AsyncPipeline] Speedup: %.2f ms (%.4f sec).\n", t_sync - t_async, (t_sync - t_async)/1000.0);
 
-    CUDA_CHECK(cudaStreamDestroy(compute_stream));
-    CUDA_CHECK(cudaStreamDestroy(transfer_stream));
-    CUDA_CHECK(cudaFreeHost(h_pinned));
+    GPU_CHK(cudaStreamDestroy(s_cmp));
+    GPU_CHK(cudaStreamDestroy(s_xfr));
+    GPU_CHK(cudaFreeHost(h_pin));
 }
 
+void run_epoch(int ep,
+               float* dw_c1, float* dw_c2, float* dw_f1, float* db_f1, float* dw_f2, float* db_f2,
+               float* dx, float* dc1, float* dp1, float* dc2, float* dp2,
+               float* df1, float* dlgt, float* dprb, float* dlss,
+               cudnnTensorDescriptor_t dx_d,
+               cudnnFilterDescriptor_t f1_d, cudnnConvolutionDescriptor_t c1_d, cudnnTensorDescriptor_t c1o_d,
+               cudnnTensorDescriptor_t p1_d, cudnnFilterDescriptor_t f2_d, cudnnConvolutionDescriptor_t c2_d,
+               cudnnTensorDescriptor_t c2o_d, cudnnTensorDescriptor_t p2_d,
+               const float* h_in, const int* h_lbl, int t_cnt) {
+               
+    int b_cnt = t_cnt / B_SIZE;
+    float sum_lss = 0.0f;
 
-/* ================================================================
- * SECTION I — DIY: Full Training Loop
- * ================================================================ */
+    for (int iter = 0; iter < b_cnt; iter++) {
+        const float* b_img = h_in + (size_t)iter * B_SIZE * IMG_SZ;
+        const int* b_tgt   = h_lbl + iter * B_SIZE;
+        int* d_tgt;
+        GPU_CHK(cudaMalloc(&d_tgt, B_SIZE * sizeof(int)));
 
-void train_epoch(int epoch,
-                 float* d_conv1_w, float* d_conv2_w,
-                 float* d_fc1_w,   float* d_fc1_b,
-                 float* d_fc2_w,   float* d_fc2_b,
-                 float* d_x, float* d_c1, float* d_p1, float* d_c2, float* d_p2,
-                 float* d_fc1, float* d_logit, float* d_prob, float* d_loss,
-                 cudnnTensorDescriptor_t     x_desc,
-                 cudnnFilterDescriptor_t     f1_desc,
-                 cudnnConvolutionDescriptor_t c1_desc,
-                 cudnnTensorDescriptor_t     c1_out_desc,
-                 cudnnTensorDescriptor_t     p1_desc,
-                 cudnnFilterDescriptor_t     f2_desc,
-                 cudnnConvolutionDescriptor_t c2_desc,
-                 cudnnTensorDescriptor_t     c2_out_desc,
-                 cudnnTensorDescriptor_t     p2_desc,
-                 const float* h_images, const int* h_labels,
-                 int n_train)
-{
-    int n_batches = n_train / BATCH_SIZE;
-    float total_loss = 0.0f;
+        GPU_CHK(cudaMemcpy(dx, b_img, (size_t)B_SIZE * IMG_SZ * sizeof(float), cudaMemcpyHostToDevice));
+        GPU_CHK(cudaMemcpy(d_tgt, b_tgt, B_SIZE * sizeof(int), cudaMemcpyHostToDevice));
 
-    for (int b = 0; b < n_batches; b++) {
-        const float* batch_imgs   = h_images + (size_t)b * BATCH_SIZE * MNIST_IMG;
-        const int* batch_labels = h_labels + b * BATCH_SIZE;
-        int* d_labels;
-        CUDA_CHECK(cudaMalloc(&d_labels, BATCH_SIZE * sizeof(int)));
+        exec_conv(dx_d, dx, f1_d, dw_c1, c1_d, c1o_d, dc1);
+        int sz_c1 = B_SIZE * 32 * 28 * 28;
+        kernel_relu<<<(sz_c1+255)/256, 256>>>(dc1, sz_c1);
+        exec_pool(c1o_d, dc1, p1_d, dp1, 2, 2, 2, 2);
 
-        CUDA_CHECK(cudaMemcpy(d_x, batch_imgs,
-                              (size_t)BATCH_SIZE * MNIST_IMG * sizeof(float),
-                              cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_labels, batch_labels,
-                              BATCH_SIZE * sizeof(int),
-                              cudaMemcpyHostToDevice));
+        exec_conv(p1_d, dp1, f2_d, dw_c2, c2_d, c2o_d, dc2);
+        int sz_c2 = B_SIZE * 64 * 14 * 14;
+        kernel_relu<<<(sz_c2+255)/256, 256>>>(dc2, sz_c2);
+        exec_pool(c2o_d, dc2, p2_d, dp2, 2, 2, 2, 2);
 
-        // I1: Forward pass — Conv1 + ReLU + Pool1
-        diy_cudnn_conv_forward(x_desc, d_x, f1_desc, d_conv1_w, c1_desc, c1_out_desc, d_c1);
-        int n_c1 = BATCH_SIZE * 32 * 28 * 28;
-        reluInPlace<<<(n_c1+255)/256, 256>>>(d_c1, n_c1);
-        diy_cudnn_maxpool_forward(c1_out_desc, d_c1, p1_desc, d_p1, 2, 2, 2, 2);
+        exec_fc(dp2, dw_f1, db_f1, df1, B_SIZE, 64*7*7, 256);
+        kernel_relu<<<(B_SIZE*256+255)/256, 256>>>(df1, B_SIZE*256);
 
-        // I2: Forward pass — Conv2 + ReLU + Pool2
-        diy_cudnn_conv_forward(p1_desc, d_p1, f2_desc, d_conv2_w, c2_desc, c2_out_desc, d_c2);
-        int n_c2 = BATCH_SIZE * 64 * 14 * 14;
-        reluInPlace<<<(n_c2+255)/256, 256>>>(d_c2, n_c2);
-        diy_cudnn_maxpool_forward(c2_out_desc, d_c2, p2_desc, d_p2, 2, 2, 2, 2);
+        exec_fc(df1, dw_f2, db_f2, dlgt, B_SIZE, 256, CLS_CNT);
 
-        // I3: Forward pass — FC1 + ReLU
-        diy_fc_forward(d_p2, d_fc1_w, d_fc1_b, d_fc1, BATCH_SIZE, 64*7*7, 256);
-        reluInPlace<<<(BATCH_SIZE*256+255)/256, 256>>>(d_fc1, BATCH_SIZE*256);
+        int th = 256, bl = (B_SIZE + th - 1) / th;
+        kernel_sce<<<bl, th>>>(dlgt, d_tgt, dprb, dlss, B_SIZE, CLS_CNT);
 
-        // I4: Forward pass — FC2 (logits)
-        diy_fc_forward(d_fc1, d_fc2_w, d_fc2_b, d_logit, BATCH_SIZE, 256, NUM_CLASSES);
+        float l_batch[B_SIZE];
+        GPU_CHK(cudaMemcpy(l_batch, dlss, B_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
+        for (int m = 0; m < B_SIZE; m++) sum_lss += l_batch[m];
 
-        // Loss
-        int T = 256, B_loss = (BATCH_SIZE + T - 1) / T;
-        softmaxCrossEntropy<<<B_loss, T>>>(d_logit, d_labels, d_prob,
-                                           d_loss, BATCH_SIZE, NUM_CLASSES);
+        if (iter % 50 == 0)
+            printf("  Epoch %d  Batch [%d/%d]  AvgLoss=%.4f\n", ep, iter, b_cnt, sum_lss / ((iter+1)*B_SIZE));
 
-        // Accumulate metrics
-        float h_loss_batch[BATCH_SIZE];
-        CUDA_CHECK(cudaMemcpy(h_loss_batch, d_loss, BATCH_SIZE * sizeof(float),
-                              cudaMemcpyDeviceToHost));
-        for (int i = 0; i < BATCH_SIZE; i++) total_loss += h_loss_batch[i];
-
-        if (b % 50 == 0)
-            printf("  Epoch %d  Batch [%d/%d]  AvgLoss=%.4f\n",
-                   epoch, b, n_batches, total_loss / ((b+1)*BATCH_SIZE));
-
-        cudaFree(d_labels);
+        cudaFree(d_tgt);
     }
 
-    printf("  --- Epoch %d Done  AvgLoss=%.4f ---\n",
-           epoch, total_loss / (n_batches * BATCH_SIZE));
+    printf("  --- Epoch %d Done  AvgLoss=%.4f ---\n", ep, sum_lss / (b_cnt * B_SIZE));
 }
 
-
-/* ================================================================
- * SECTION J — STRETCH: Mixed Precision
- * ================================================================ */
-
-void stretch_fp16_matmul(int M, int N, int K)
-{
-    printf("  [J-FP16-TensorCore] STRETCH: cublasGemmEx logic with CUDA_R_16F would execute here.\n");
+void demo_fp16(int dm, int dn, int dk) {
+    printf("  [FP16-TensorCore] cublasGemmEx logic with CUDA_R_16F would execute here.\n");
 }
 
-
-/* ================================================================
- * MAIN
- * ================================================================ */
-int main(void)
-{
+int main(void) {
     printf("\n========================================================\n");
-    printf("  CUDA DIY Exercise 5: MNIST CNN (cuDNN + cuBLAS)\n");
+    printf("  CUDA Exercise: MNIST CNN (cuDNN + cuBLAS)\n");
     printf("========================================================\n");
 
-    cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+    cudaDeviceProp dev_p;
+    GPU_CHK(cudaGetDeviceProperties(&dev_p, 0));
     printf("  GPU: %s  Compute: %d.%d  VRAM: %.0f MB\n\n",
-           prop.name, prop.major, prop.minor,
-           prop.totalGlobalMem / 1e6);
+           dev_p.name, dev_p.major, dev_p.minor,
+           dev_p.totalGlobalMem / 1e6);
 
-    CUDNN_CHECK(cudnnCreate(&cudnn));
-    CUBLAS_CHECK(cublasCreate(&cublas));
+    DNN_CHK(cudnnCreate(&dnn_hndl));
+    BLAS_CHK(cublasCreate(&blas_hndl));
 
-    /* ── Load MNIST ────────────────────────────────────────── */
-    MnistData train = load_mnist(
-        "data/train-images-idx3-ubyte",
-        "data/train-labels-idx1-ubyte");
-    MnistData test = load_mnist(
-        "data/t10k-images-idx3-ubyte",
-        "data/t10k-labels-idx1-ubyte");
+    Dataset d_trn = load_dataset("data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte");
+    Dataset d_tst = load_dataset("data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte");
 
-    /* ── Allocate weights (random init) ────────────────────── */
-    float *d_conv1_w, *d_conv2_w;
-    float *d_fc1_w, *d_fc1_b, *d_fc2_w, *d_fc2_b;
+    float *d_w_c1, *d_w_c2;
+    float *d_w_f1, *d_b_f1, *d_w_f2, *d_b_f2;
 
-    CUDA_CHECK(cudaMalloc(&d_conv1_w, 32*1*5*5   * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_conv2_w, 64*32*5*5  * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_fc1_w,   256*3136   * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_fc1_b,   256        * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_fc2_w,   10*256     * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_fc2_b,   10         * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_w_c1, 32*1*5*5   * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_w_c2, 64*32*5*5  * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_w_f1, 256*3136   * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_b_f1, 256        * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_w_f2, 10*256     * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_b_f2, 10         * sizeof(float)));
 
-    /* He initialisation on CPU, copy to GPU */
     {
-        int lens[] = {32*1*5*5, 64*32*5*5, 256*3136, 256, 10*256, 10};
-        float* ptrs_d[] = {d_conv1_w, d_conv2_w, d_fc1_w, d_fc1_b, d_fc2_w, d_fc2_b};
-        for (int p = 0; p < 6; p++) {
-            float* tmp = (float*)malloc(lens[p] * sizeof(float));
-            float scale = sqrtf(2.0f / lens[p]);
-            for (int i = 0; i < lens[p]; i++)
-                tmp[i] = scale * (2.0f * (float)rand()/RAND_MAX - 1.0f);
-            CUDA_CHECK(cudaMemcpy(ptrs_d[p], tmp, lens[p]*sizeof(float),
-                                  cudaMemcpyHostToDevice));
-            free(tmp);
+        int w_lens[] = {32*1*5*5, 64*32*5*5, 256*3136, 256, 10*256, 10};
+        float* d_ptrs[] = {d_w_c1, d_w_c2, d_w_f1, d_b_f1, d_w_f2, d_b_f2};
+        for (int idx = 0; idx < 6; idx++) {
+            float* arr = (float*)malloc(w_lens[idx] * sizeof(float));
+            float scl = sqrtf(2.0f / w_lens[idx]);
+            for (int m = 0; m < w_lens[idx]; m++)
+                arr[m] = scl * (2.0f * (float)rand()/RAND_MAX - 1.0f);
+            GPU_CHK(cudaMemcpy(d_ptrs[idx], arr, w_lens[idx]*sizeof(float), cudaMemcpyHostToDevice));
+            free(arr);
         }
     }
 
-    /* ── Allocate feature maps ──────────────────────────────── */
-    float *d_x, *d_c1, *d_p1, *d_c2, *d_p2, *d_fc1, *d_logit, *d_prob, *d_loss;
-    CUDA_CHECK(cudaMalloc(&d_x,     (size_t)BATCH_SIZE*1 *28*28 * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_c1,    (size_t)BATCH_SIZE*32*28*28 * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_p1,    (size_t)BATCH_SIZE*32*14*14 * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_c2,    (size_t)BATCH_SIZE*64*14*14 * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_p2,    (size_t)BATCH_SIZE*64*7 *7  * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_fc1,   (size_t)BATCH_SIZE*256       * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_logit, (size_t)BATCH_SIZE*10         * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_prob,  (size_t)BATCH_SIZE*10         * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_loss,  (size_t)BATCH_SIZE             * sizeof(float)));
+    float *d_inx, *d_m_c1, *d_m_p1, *d_m_c2, *d_m_p2, *d_m_f1, *d_lgt, *d_prb, *d_lss;
+    GPU_CHK(cudaMalloc(&d_inx,  (size_t)B_SIZE*1 *28*28 * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_m_c1, (size_t)B_SIZE*32*28*28 * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_m_p1, (size_t)B_SIZE*32*14*14 * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_m_c2, (size_t)B_SIZE*64*14*14 * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_m_p2, (size_t)B_SIZE*64*7 *7  * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_m_f1, (size_t)B_SIZE*256       * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_lgt,  (size_t)B_SIZE*10         * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_prb,  (size_t)B_SIZE*10         * sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_lss,  (size_t)B_SIZE             * sizeof(float)));
 
-    /* ── cuDNN Descriptors ──────────────────────────────────── */
-    cudnnTensorDescriptor_t     x_desc      = make_tensor_desc(BATCH_SIZE, 1,  28, 28);
-    cudnnTensorDescriptor_t     c1_out_desc = make_tensor_desc(BATCH_SIZE, 32, 28, 28);
-    cudnnTensorDescriptor_t     p1_desc     = make_tensor_desc(BATCH_SIZE, 32, 14, 14);
-    cudnnTensorDescriptor_t     c2_out_desc = make_tensor_desc(BATCH_SIZE, 64, 14, 14);
-    cudnnTensorDescriptor_t     p2_desc     = make_tensor_desc(BATCH_SIZE, 64, 7,  7);
+    cudnnTensorDescriptor_t     desc_x    = create_tsr_desc(B_SIZE, 1,  28, 28);
+    cudnnTensorDescriptor_t     desc_c1_o = create_tsr_desc(B_SIZE, 32, 28, 28);
+    cudnnTensorDescriptor_t     desc_p1   = create_tsr_desc(B_SIZE, 32, 14, 14);
+    cudnnTensorDescriptor_t     desc_c2_o = create_tsr_desc(B_SIZE, 64, 14, 14);
+    cudnnTensorDescriptor_t     desc_p2   = create_tsr_desc(B_SIZE, 64, 7,  7);
 
-    cudnnFilterDescriptor_t     f1_desc     = make_filter_desc(32, 1,  5, 5);
-    cudnnFilterDescriptor_t     f2_desc     = make_filter_desc(64, 32, 5, 5);
+    cudnnFilterDescriptor_t     desc_f1   = create_flt_desc(32, 1,  5, 5);
+    cudnnFilterDescriptor_t     desc_f2   = create_flt_desc(64, 32, 5, 5);
 
-    cudnnConvolutionDescriptor_t c1_desc    = make_conv_desc(2, 1);
-    cudnnConvolutionDescriptor_t c2_desc    = make_conv_desc(2, 1);
+    cudnnConvolutionDescriptor_t desc_c1  = create_cnv_desc(2, 1);
+    cudnnConvolutionDescriptor_t desc_c2  = create_cnv_desc(2, 1);
 
-    /* ── Training Loop ──────────────────────────────────────── */
-    printf("\n[Training] Starting for %d epochs...\n\n", NUM_EPOCHS);
+    printf("\n[Training] Starting for %d epochs...\n\n", EPOCHS);
 
-    for (int epoch = 1; epoch <= NUM_EPOCHS; epoch++) {
-        double t0 = wall_ms();
+    for (int ep = 1; ep <= EPOCHS; ep++) {
+        double start_t = get_time_ms();
 
-        train_epoch(epoch,
-                    d_conv1_w, d_conv2_w,
-                    d_fc1_w, d_fc1_b, d_fc2_w, d_fc2_b,
-                    d_x, d_c1, d_p1, d_c2, d_p2,
-                    d_fc1, d_logit, d_prob, d_loss,
-                    x_desc, f1_desc, c1_desc, c1_out_desc, p1_desc,
-                    f2_desc, c2_desc, c2_out_desc, p2_desc,
-                    train.images, train.labels, train.n);
+        run_epoch(ep, d_w_c1, d_w_c2, d_w_f1, d_b_f1, d_w_f2, d_b_f2,
+                  d_inx, d_m_c1, d_m_p1, d_m_c2, d_m_p2, d_m_f1, d_lgt, d_prb, d_lss,
+                  desc_x, desc_f1, desc_c1, desc_c1_o, desc_p1,
+                  desc_f2, desc_c2, desc_c2_o, desc_p2,
+                  d_trn.imgs, d_trn.lbls, d_trn.count);
 
-        double epoch_ms = wall_ms() - t0;
-        printf("  Epoch %d complete in %.1f s\n\n", epoch, epoch_ms / 1000.0);
+        double ms_ep = get_time_ms() - start_t;
+        printf("  Epoch %d complete in %.1f s\n\n", ep, ms_ep / 1000.0);
     }
 
-    /* ── Stretch ────────────────────────────────────────────── */
     printf("[Stretch] CUDA Streams async pipeline:\n");
-    float *d_bufA, *d_bufB;
-    CUDA_CHECK(cudaMalloc(&d_bufA, (size_t)BATCH_SIZE*MNIST_IMG*sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_bufB, (size_t)BATCH_SIZE*MNIST_IMG*sizeof(float)));
-    diy_async_pipeline_demo(train.images, train.n, d_bufA, d_bufB);
-    cudaFree(d_bufA); cudaFree(d_bufB);
+    float *d_bA, *d_bB;
+    GPU_CHK(cudaMalloc(&d_bA, (size_t)B_SIZE*IMG_SZ*sizeof(float)));
+    GPU_CHK(cudaMalloc(&d_bB, (size_t)B_SIZE*IMG_SZ*sizeof(float)));
+    demo_async(d_trn.imgs, d_trn.count, d_bA, d_bB);
+    cudaFree(d_bA); cudaFree(d_bB);
 
     printf("\n[Stretch] FP16 Tensor Core GEMM:\n");
-    stretch_fp16_matmul(1024, 1024, 1024);
+    demo_fp16(1024, 1024, 1024);
 
-    /* ── Cleanup ────────────────────────────────────────────── */
-    cudaFree(d_conv1_w); cudaFree(d_conv2_w);
-    cudaFree(d_fc1_w);   cudaFree(d_fc1_b);
-    cudaFree(d_fc2_w);   cudaFree(d_fc2_b);
-    cudaFree(d_x);  cudaFree(d_c1); cudaFree(d_p1);
-    cudaFree(d_c2); cudaFree(d_p2); cudaFree(d_fc1);
-    cudaFree(d_logit); cudaFree(d_prob); cudaFree(d_loss);
-    free(train.images); free(train.labels);
-    free(test.images);  free(test.labels);
-    cudnnDestroy(cudnn);
-    cublasDestroy(cublas);
+    cudaFree(d_w_c1); cudaFree(d_w_c2);
+    cudaFree(d_w_f1); cudaFree(d_b_f1);
+    cudaFree(d_w_f2); cudaFree(d_b_f2);
+    cudaFree(d_inx);  cudaFree(d_m_c1); cudaFree(d_m_p1);
+    cudaFree(d_m_c2); cudaFree(d_m_p2); cudaFree(d_m_f1);
+    cudaFree(d_lgt);  cudaFree(d_prb);  cudaFree(d_lss);
+    
+    free(d_trn.imgs); free(d_trn.lbls);
+    free(d_tst.imgs); free(d_tst.lbls);
+    
+    cudnnDestroy(dnn_hndl);
+    cublasDestroy(blas_hndl);
 
     printf("\n========================================================\n");
-    printf("  Exercise 5 complete!\n");
+    printf("  Execution complete!\n");
     printf("========================================================\n\n");
     return 0;
 }
